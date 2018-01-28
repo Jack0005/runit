@@ -1,0 +1,255 @@
+#!/bin/bash
+
+ENV_FILE=".env"
+PROCFILE="./Procfile"
+
+export PORT=8080
+export DATE_FORMAT="+%Y-%m-%d|%H:%M:%S"
+export COLOR=30
+
+function usage() {
+	printf "Usage: runit [-c] [-f procfile|Procfile] [-e envfile|.env]"
+	printf "\n"
+	printf "\t-c\tverify procfile and envfile"
+	printf "\n"
+	printf "\t-f procfile|Procfile\tload and run applications in procfile|Procfile"
+	printf "\n"
+	printf "\t-e envfile|.env\tload environment variables in envfile|.env"
+	printf "\n"
+}
+
+function verify() {
+
+	local procfile=${1}
+	local envfile=${2}
+
+	local DONE=false
+
+	local key
+	local value
+
+	local ret_state=false
+	until $DONE
+	do read line || DONE=true
+		
+		#去除注释和空行
+		line=`echo ${line} |grep -v "^#"|grep -v "^$"`
+		[[ ${line} == "" ]] &&	continue
+
+		#以"="为分界，取出环境变量和对应的值
+		local len
+		local pos
+		pos=`expr index "$line" "="`
+
+		if [[ $pos == 0 ]]
+		then 
+			echo "$line"
+			ret_state=true
+			continue
+		fi
+
+		(( pos-- ))
+		key=${line:0:${pos}}
+
+		(( pos++ ))
+		len=${#line}
+		len=$(( len-pos ))
+		value=${line:$pos:$len}
+
+		#环境变量为[a-zA-Z0-9_],对应值非空且不包含空格
+		key=`echo ${key} |grep "[^a-zA-Z_0-9]"`
+
+		if [[ ${key} != "" || ${value} =~ " " || ${value} == ""  ]]
+		then
+			echo ${line}
+			ret_state=true
+		fi
+	done < ${envfile}
+
+
+	local command_name
+	local command_cmd
+
+	DONE=false
+	until $DONE
+	do read line || DONE=true
+		
+		#去除注释和空行
+		line=`echo ${line} |grep -v "^#"|grep -v "^$"`
+		[[ ${line} == "" ]] && continue
+
+		#以":"为分界，取出应用程序名称和对应的程序
+		len=${#line}
+		pos=`expr index "$line" ":"`
+		if [[ $pos == 0 ]]
+		then
+			echo ${line}
+			continue
+		fi
+
+		(( pos-- ))
+		command_name=${line:0:${pos}}
+
+		(( pos++ ))
+		len=$(( len-pos ))
+		command_cmd=${line:$pos:$len}
+		
+		#应用程序名为[a-zA-Z0-9_]
+		command_name=`echo ${task_name} |grep -v "^[a-zA-Z_0-9]$"`
+
+		if [[ ${command_name} == "" ]]
+		then
+			echo ${line}
+			ret_state=true
+		fi
+	done < ${procfile}
+
+	if $ret_state
+	then
+		exit -1
+	fi
+}
+
+#日志函数
+
+function log(){
+
+	command_name=$1
+	log_info=$2
+	command_color=$3
+			
+	cur_time=`date +%k:%M:%S`
+	log_info_with_color="\033[%dm%s %s\t|\033[0m %s\n"
+
+	printf "${log_info_with_color}" "$command_color" "$cur_time" "$command_name" "$log_info"
+}
+
+#更新颜色取值
+function color(){
+
+	COLOR=$(( (COLOR+1-30)%8+30 ))
+}
+
+#运行应用程序
+function run_command() {
+
+	color
+
+	command_name=$1
+	command_cmd=$2
+	command_color=$COLOR
+
+	bash -c "${command_cmd}" > >(
+			while read log_info
+			do 
+				log "${command_name}" "${log_info}" "${command_color}"
+			done
+			) 2>&1 &
+	
+	command_info="$(eval echo ${command_cmd}) started with pid $!"
+
+	log "${command_name}" "${command_info}" "${command_color}"
+}
+
+#载入环境变量
+function load_env_file() {
+
+	local envfile="$1"
+
+	! [[ -e ${envfile} ]] && return 0
+
+	local DONE=false
+	until $DONE
+	do read line || DONE=true
+		
+		line=`echo ${line} |grep -v "^#"|grep -v "^$"`
+		[[ ${line} == "" ]] && continue 
+
+		eval "export "${line}""
+	done < ${envfile} 
+}
+
+#清理后台进程
+function kill_thread(){
+	echo ""
+	for pid in `jobs -p`
+	do
+		echo "kill ${pid}"
+		kill  ${pid}
+	done
+}
+
+#加载函数
+function run_procfile() {
+	
+
+	local procfile=$1
+	local DONE=false
+
+	local command_name
+	local command_cmd
+	
+	! [[ -e ${procfile} ]] && return 0
+
+	until $DONE
+	do read line || DONE=true	
+
+		line=`echo ${line} |grep -v "^#"|grep -v "^$"`
+		[[ ${line} == "" ]] &&	continue
+
+		local len
+		local pos
+
+		len=${#line}
+		pos=`expr index "$line" ":"`
+		(( pos-- ))
+		command_name=${line:0:${pos}}
+
+		(( pos++ ))
+		len=$(( len-pos ))
+		command_cmd=${line:$pos:$len}
+	
+		run_command "${command_name}" "${command_cmd}"
+		
+		if [[ ${command_cmd} =~ "\$PORT" ]]
+		then
+			PORT=$(( ${PORT}+1 ))
+		fi
+
+	done < ${procfile}
+}
+
+
+function main() {
+
+	local procfile="${PROCFILE}"
+	local envfile="${ENV_FILE}"
+	local verify_file=false
+
+	while getopts ce:f:h opt
+	do
+		case "$opt" in
+		c) verify_file=true ;;
+		f) procfile=${OPTARG} ;;
+		e) envfile=${OPTARG} ;;
+		h) usage;exit -1 ;;
+		?) usage
+			echo "Invalid option: -$OPTARG"
+			exit -1
+			;;
+		esac
+	done
+
+	if $verify_file
+	then
+		verify ${procfile} ${envfile}
+	fi
+
+	load_env_file "${envfile}"
+	run_procfile "${procfile}"
+
+	wait
+}
+
+trap "kill_thread" SIGINT SIGTERM
+main "$@"
